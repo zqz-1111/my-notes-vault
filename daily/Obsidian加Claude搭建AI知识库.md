@@ -65,13 +65,60 @@ Obsidian 笔记 ←→ Git 本地仓库 ←→ GitHub 私有仓库
               Obsidian Git 插件（自动 commit + push）
 ```
 
-### 接下来可以做的
+### Git 切换 SSH
 
-- [ ] 在 vault 根目录建立 `CLAUDE.md`，写上笔记规范和 AI 行为边界
-- [ ] 设置 `/today` slash command，自动生成每日笔记
-- [ ] 试试批量给笔记加标签和反向链接
-- [ ] 建立 PARA 结构的文件夹（projects / areas / resources / archive）
+HTTPS 推送在国内网络不稳定，改成了 SSH：
+- 本地已有 SSH key（ed25519）
+- `git remote set-url origin git@github.com:zqz-1111/my-notes-vault.git`
+- 推送稳定了，后续由 Claude 直接 push，不依赖 Obsidian Git 插件
+
+### 打通 IDEA + VSCode 双端 Claude
+
+目标：IDEA 学 Java 项目时也能直接写笔记到 Obsidian。
+
+1. 在 IDEA 里安装了 Claude Code 插件
+2. 发现两边的 Claude 实例不共享记忆
+3. 解决方案：在 vault 根目录建 `CLAUDE.md`（工作流指令），任何 Claude 实例启动时自动读取
+4. 更进一步：把指令写到 `~/.claude/CLAUDE.md`（全局），这样不管在哪个文件夹打开 Claude 都知道流程
+
+### 建立 Vault 目录结构
+
+```
+MyVault/
+├── CLAUDE.md           ← 工作流指令
+├── daily/              ← 日记/杂记
+├── projects/           ← 项目学习笔记
+├── snippets/           ← 代码片段库
+├── interview/          ← 面试题收集
+├── progress/           ← 学习进度追踪
+├── resources/          ← 参考资料
+└── assets/             ← 附件
+```
+
+### 编写完整工作流 CLAUDE.md
+
+给 Claude 写了一套完整的自动化指令，包含 6 大能力：
+
+1. **新对话自动恢复** — 读 `progress/学习进度.md`，接上上次学到哪
+2. **项目上下文记忆** — 记住当前在学什么项目
+3. **自动判断写几篇** — 回顾对话按主题拆分，同主题追加不重复
+4. **多目录分发** — 项目笔记/代码片段/面试题自动分类存储
+5. **Wikilinks 关联** — 笔记间用 `[[笔记名]]` 互相链接，形成知识图谱
+6. **主动提醒** — 学了很多没记笔记时主动问"要记一下吗？"
+7. **代码变更记录** — 记录增删改了哪些文件
+
+### 最终链路
+
+```
+IDEA 学习 → Claude 参与改错/写代码 → 说"写笔记"
+    ↓
+Claude 回顾对话 → 自动判断主题 → 查重 → 分类 → 命名 → 写入
+    ↓
+Obsidian vault（daily/ + projects/ + snippets/ + interview/）
+    ↓
+git push → GitHub 私有仓库
+```
 
 ---
 
-> 今天最大的收获：从"知道 Obsidian + Claude 很火"到"自己跑通了整个链路"。下一步是把这套工具真正用起来，让知识库开始积累。
+> 今天从零搭建了一套完整的 AI 知识管理系统：MCP 打通读写、Git 版本管理、GitHub 备份、双端 Claude 共享指令、自动化笔记工作流。明天开始用它记录 Java 项目学习。
