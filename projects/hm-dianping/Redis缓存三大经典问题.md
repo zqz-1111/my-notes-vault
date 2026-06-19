@@ -391,6 +391,7 @@ public void saveShop2Redis(Long id, Long expiredSeconds) {
 
 ## 八、关联笔记
 
+- [[缓存模块总结]] — 缓存模块完整总结
 - [[Redis基础篇]]
 - [[缓存空对象实现]]
 

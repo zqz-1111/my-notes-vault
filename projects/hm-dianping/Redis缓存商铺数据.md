@@ -129,6 +129,7 @@ public Result updateByIdWithCache(Shop shop) {
 
 ## 七、关联笔记
 
+- [[缓存模块总结]] — 缓存模块完整总结
 - [[登录功能完整实现]] — 登录拦截器重构也在本次学习中完成
 - [[Redis基础入门]] — Redis 基础数据结构和命令
 - [[Redis的Java客户端]] — Jedis 和 SpringDataRedis
