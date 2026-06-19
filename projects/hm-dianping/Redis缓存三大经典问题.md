@@ -154,46 +154,92 @@ stringRedisTemplate.expire(key, 60 + randomMinutes, TimeUnit.MINUTES);
 请求 1 完成后，请求 2/3 → 缓存命中 → 直接返回
 ```
 
-**代码思路：**
+**代码实现（已完成）：**
 
 ```java
+// 入口方法
+@Override
 public Result queryById(Long id) {
-    String key = CACHE_SHOP_KEY + id;
+    // 互斥锁解决缓存击穿
+    Shop shop = queryWithMutex(id);
+    if (shop == null) {
+        return Result.fail("店铺不存在！");
+    }
+    return Result.ok(shop);
+}
+
+// 互斥锁方法
+public Shop queryWithMutex(Long id) {
+    String key = RedisConstants.CACHE_SHOP_KEY + id;
+    // 1. 从 Redis 查询缓存
     String shopJson = stringRedisTemplate.opsForValue().get(key);
 
-    // 1. 缓存命中，直接返回
+    // 2. 命中有效数据，直接返回
     if (StrUtil.isNotBlank(shopJson)) {
-        return Result.ok(JSONUtil.toBean(shopJson, Shop.class));
+        Shop shop = JSONUtil.toBean(shopJson, Shop.class);
+        return shop;
     }
 
-    // 2. 缓存未命中，尝试获取锁
-    String lockKey = LOCK_SHOP_KEY + id;
-    boolean isLock = tryLock(lockKey);
-
-    if (!isLock) {
-        // 3. 获取锁失败，等待后重试
-        Thread.sleep(50);
-        return queryById(id);
+    // 3. 命中空值（防穿透），返回 null
+    if (shopJson != null) {
+        return null;
     }
 
+    // 4. 缓存未命中，实现缓存重建
+    String lockKey = RedisConstants.LOCK_SHOP_KEY + id;
+    Shop shop = null;
     try {
-        // 4. 双重检查
-        shopJson = stringRedisTemplate.opsForValue().get(key);
-        if (StrUtil.isNotBlank(shopJson)) {
-            return Result.ok(JSONUtil.toBean(shopJson, Shop.class));
+        // 4.1 获取互斥锁
+        boolean islock = tryLock(lockKey);
+
+        // 4.2 获取失败，休眠并重试
+        if (!islock) {
+            Thread.sleep(50);
+            return queryWithMutex(id);  // 递归重试
         }
 
-        // 5. 查数据库，写缓存
-        Shop shop = this.getById(id);
+        // 4.3 获取成功，查数据库
+        shop = getById(id);
+
+        if (shop == null) {
+            // 数据库也没有，缓存空对象
+            stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop),
+                    RedisConstants.CACHE_NULL_TTL, TimeUnit.MINUTES);
+            return null;
+        }
+
+        // 4.4 数据库有，写入缓存
         stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop),
-                CACHE_SHOP_TTL, TimeUnit.MINUTES);
-        return Result.ok(shop);
+                RedisConstants.CACHE_SHOP_TTL, TimeUnit.MINUTES);
+
+    } catch (InterruptedException e) {
+        throw new RuntimeException(e);
     } finally {
-        // 6. 释放锁
+        // 5. 释放互斥锁
         unlock(lockKey);
     }
+
+    return shop;
+}
+
+// 加锁方法（SETNX）
+private boolean tryLock(String key) {
+    Boolean flag = stringRedisTemplate.opsForValue()
+        .setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
+    return BooleanUtil.isTrue(flag);
+}
+
+// 解锁方法
+private void unlock(String key) {
+    stringRedisTemplate.delete(key);
 }
 ```
+
+**核心要点：**
+- `setIfAbsent` = Redis 的 `SETNX`，key 不存在才设置成功，实现互斥
+- 锁的 TTL 设 10 秒，防止死锁
+- 没拿到锁 → sleep 50ms → 递归重试
+- `finally` 确保锁一定释放
 
 **方案二：逻辑过期 + 异步更新（不阻塞请求）**
 
@@ -203,6 +249,72 @@ public Result queryById(Long id) {
 ```
 
 **核心思想：** 缓存不设真正的 TTL，在 value 里存一个"逻辑过期时间"。读到数据发现过期了，就返回旧数据，同时异步去更新缓存。
+
+**代码实现（已完成，注释备用）：**
+
+```java
+// 线程池用于异步重建缓存
+private static final ExecutorService CACHE_REBUILD_EXECUTOR = 
+    Executors.newFixedThreadPool(10);
+
+public Shop queryWithLogicalExpire(Long id) {
+    String key = CACHE_SHOP_KEY + id;
+    // 1. 从 Redis 查询缓存
+    String json = stringRedisTemplate.opsForValue().get(key);
+    
+    // 2. 不存在，直接返回
+    if (StrUtil.isBlank(json)) {
+        return null;
+    }
+    
+    // 3. 命中，反序列化
+    RedisData redisData = JSONUtil.toBean(json, RedisData.class);
+    Shop shop = JSONUtil.toBean((JSONObject) redisData.getData(), Shop.class);
+    LocalDateTime expireTime = redisData.getExpireTime();
+    
+    // 4. 判断是否过期
+    if (expireTime.isAfter(LocalDateTime.now())) {
+        // 4.1 未过期，直接返回
+        return shop;
+    }
+    
+    // 4.2 已过期，需要缓存重建
+    String lockKey = LOCK_SHOP_KEY + id;
+    boolean isLock = tryLock(lockKey);
+    
+    // 5. 获取到锁才开启异步重建
+    if (isLock) {
+        CACHE_REBUILD_EXECUTOR.submit(() -> {
+            try {
+                this.saveShop2Redis(id, 20L);  // 重建缓存
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            } finally {
+                unlock(lockKey);
+            }
+        });
+    }
+    
+    // 6. 不管有没有获取到锁，都返回旧数据
+    return shop;
+}
+
+// 预热缓存时调用：把数据写入 Redis 并设置逻辑过期时间
+public void saveShop2Redis(Long id, Long expiredSeconds) {
+    Shop shop = getById(id);
+    RedisData redisData = new RedisData();
+    redisData.setData(shop);
+    redisData.setExpireTime(LocalDateTime.now().plusSeconds(expiredSeconds));
+    // 注意：Redis key 本身永不过期，靠逻辑时间判断
+    stringRedisTemplate.opsForValue().set(
+        CACHE_SHOP_KEY + id, JSONUtil.toJsonStr(redisData));
+}
+```
+
+**核心要点：**
+- Redis key **永不过期**，在 value 里存逻辑过期时间
+- 过期后返回旧数据，异步重建缓存（用线程池）
+- 不阻塞用户请求，高并发场景性能更好
 
 **方案三：热点数据永不过期（从根源避免）**
 
@@ -253,6 +365,11 @@ public Result queryById(Long id) {
 - 问题：第一个请求异常退出，锁没释放，其他请求永远等待
 - 正确做法：用 try-finally 确保释放锁
 
+**坑 4：方法名大小写写错**
+- 报错信息：`无法解析 'ShopServiceImpl' 中的方法 'trylock'`
+- 原因：Java 大小写敏感，调用 `trylock` 但定义是 `tryLock`（大写 L）
+- 解决方案：保持调用和定义的大小写一致，IDE 通常会提示
+
 ---
 
 ## 六、效果验证
@@ -282,5 +399,6 @@ public Result queryById(Long id) {
 ## 九、代码变更
 
 - 已实现：`src/main/java/com/hmdp/service/impl/ShopServiceImpl.java` — 缓存空对象防穿透
+- 已实现：`src/main/java/com/hmdp/service/impl/ShopServiceImpl.java` — 互斥锁防击穿（queryWithMutex）
+- 已实现：`src/main/java/com/hmdp/service/impl/ShopServiceImpl.java` — 逻辑过期防击穿（queryWithLogicalExpire，注释备用）
 - 已定义：`src/main/java/com/hmdp/utils/RedisConstants.java` — CACHE_NULL_TTL、LOCK_SHOP_KEY 等常量
-- 待实现：互斥锁防击穿、逻辑过期防击穿
