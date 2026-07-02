@@ -373,7 +373,190 @@ user.setConfig(config);
 
 ---
 
-## 六、MP 分页 vs PageHelper 对比
+## 六、从复杂到简洁：MP 分页的简化过程
+
+> 很多人初看 MP 分页觉得"概念多"（Page、Wrapper、PageVO、插件），但其实每个概念都在消灭一段重复代码。下面用一个完整的用户分页查询场景，展示从原始写法到 MP 写法的转化过程。
+
+### 6.1 先看"复杂"的原始写法
+
+需求：用户分页查询，带条件筛选、排序、总数查询。**不用任何框架**，纯手写：
+
+**第一步：Mapper 接口（2 个方法）**
+
+```java
+public interface UserMapper {
+    // 方法1：查总数（分页需要知道一共有多少条）
+    int selectCount(@Param("keyword") String keyword, 
+                    @Param("status") Integer status);
+    
+    // 方法2：查当前页数据（要手动算 offset）
+    List<User> selectPageList(@Param("keyword") String keyword,
+                              @Param("status") Integer status,
+                              @Param("offset") int offset,
+                              @Param("pageSize") int pageSize);
+}
+```
+
+**第二步：XML SQL（条件写两遍）**
+
+```xml
+<!-- 查总数 -->
+<select id="selectCount" resultType="int">
+    SELECT COUNT(*) FROM user
+    <where>
+        <if test="keyword != null and keyword != ''">
+            AND username LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        <if test="status != null">
+            AND status = #{status}
+        </if>
+    </where>
+</select>
+
+<!-- 查分页数据 —— 👇 条件和上面一模一样，复制粘贴了一遍 -->
+<select id="selectPageList" resultType="User">
+    SELECT * FROM user
+    <where>
+        <if test="keyword != null and keyword != ''">
+            AND username LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        <if test="status != null">
+            AND status = #{status}
+        </if>
+    </where>
+    ORDER BY create_time DESC
+    LIMIT #{offset}, #{pageSize}
+</select>
+```
+
+**第三步：Service 层（手动算 offset + 手动封装）**
+
+```java
+public PageVO<UserVO> queryUserPage(Integer pageNum, Integer pageSize, 
+                                     String keyword, Integer status) {
+    // 1. 手动算 offset
+    int offset = (pageNum - 1) * pageSize;
+    
+    // 2. 查总数
+    int total = userMapper.selectCount(keyword, status);
+    if (total == 0) {
+        return PageVO.empty();
+    }
+    
+    // 3. 查数据
+    List<User> users = userMapper.selectPageList(keyword, status, offset, pageSize);
+    
+    // 4. 手动转 VO
+    List<UserVO> voList = users.stream()
+        .map(user -> BeanUtil.copyProperties(user, UserVO.class))
+        .collect(Collectors.toList());
+    
+    // 5. 手动封装返回值（算总页数、set 字段）
+    PageVO<UserVO> vo = new PageVO<>();
+    vo.setTotal((long) total);
+    vo.setPages((long) Math.ceil((double) total / pageSize));
+    vo.setList(voList);
+    return vo;
+}
+```
+
+**痛点总结：**
+
+- Mapper 要写 **2 个方法**（count + list）
+- XML 里条件 **复制粘贴两遍**
+- Service 里要 **手动算 offset**、**手动算总页数**
+- 每个分页接口都要 **重复写这些样板代码**
+
+---
+
+### 6.2 MP 逐步简化过程
+
+**简化 1：消灭"两个方法"**
+
+原始：查总数 + 查数据 = 2 个方法
+
+MP：`Page` 对象封装了分页参数，插件自动拦截 SQL，**一个方法搞定**
+
+```java
+// MP 帮你做了：自动在 SQL 前面加 SELECT COUNT(*)，自动拼 LIMIT
+Page<User> page = new Page<>(pageNum, pageSize);
+Page<User> result = userMapper.selectPage(page, wrapper);
+// result 里同时有：records（数据）+ total（总数）+ pages（总页数）
+```
+
+**简化 2：消灭"条件复制粘贴"**
+
+原始：条件写两遍（XML 里 count 和 list 各一遍）
+
+MP：用 `LambdaQueryWrapper` 构建条件，**只写一次**
+
+```java
+LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<User>()
+    .like(StringUtils.isNotBlank(keyword), User::getUsername, keyword)
+    .eq(status != null, User::getStatus, status)
+    .orderByDesc(User::getCreateTime);
+
+// 这个 wrapper 传给 page()，MP 自动用于 count 和 select 两条 SQL
+Page<User> result = userService.page(page, wrapper);
+```
+
+**简化 3：消灭"手动算 offset"**
+
+原始：`int offset = (pageNum - 1) * pageSize;`
+
+MP：你只管传 pageNum 和 pageSize，**MP 内部自己算**
+
+```java
+new Page<>(2, 10);  // 第2页，每页10条
+// MP 内部自动算出 offset=10，生成 LIMIT 10, 10
+```
+
+**简化 4：消灭"手动封装返回值"**
+
+原始：手动 new PageVO、setTotal、setPages、setList
+
+MP：配合 `PageVO.of()` **一行搞定**
+
+```java
+return PageVO.of(result, UserVO.class);
+// 内部自动：取 total、取 pages、取 records 并转 VO
+```
+
+---
+
+### 6.3 最终对比
+
+| 步骤 | 原始写法 | MP 写法 |
+|---|---|---|
+| Mapper 方法 | 2 个（count + list） | 1 个（或直接用内置） |
+| XML | 条件写两遍 | 不用写 XML |
+| 算 offset | 手动 `(pageNum-1)*pageSize` | 自动 |
+| 查总数 | 单独调一次 count | 自动插入 count SQL |
+| 算总页数 | 手动 `ceil(total/pageSize)` | 自动 `page.getPages()` |
+| 封装返回 | 手动 set 3 个字段 | `PageVO.of(page)` |
+
+**最终 MP 写法只有 3 行核心代码：**
+
+```java
+Page<User> page = new Page<>(pageNum, pageSize);          // 1. 创建分页
+Page<User> result = userService.page(page, wrapper);      // 2. 查询
+return PageVO.of(result, UserVO.class);                   // 3. 返回
+```
+
+### 6.4 小结
+
+MP 分页看起来"概念多"（Page、Wrapper、PageVO、插件），但每个概念都在帮你**消灭一段重复代码**：
+
+- `PaginationInnerInterceptor` → 消灭"手写 LIMIT + COUNT"
+- `Page` 对象 → 消灭"手动算 offset + 手动算总页数"
+- `LambdaQueryWrapper` → 消灭"XML 条件复制粘贴两遍"
+- `PageVO.of()` → 消灭"手动封装返回值"
+
+**配置一次，终身受益。**
+
+---
+
+## 七、MP 分页 vs PageHelper 对比
 
 ### 6.1 PageHelper 写法
 
