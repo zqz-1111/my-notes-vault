@@ -307,7 +307,306 @@ docker run -d --name myapp -p 8080:8080 myapp:1.0
 
 ---
 
-## 六、全文总结
+## 六、容器网络互联
+
+### 6.1 问题：容器之间怎么互相访问？
+
+假设部署了 Java 项目 + MySQL，分两个容器跑：
+
+```bash
+docker run -d --name mysql -p 3306:3306 -e MYSQL_ROOT_PASSWORD=123 mysql
+docker run -d --name myapp -p 8080:8080 myapp:1.0
+```
+
+Java 项目里 JDBC 连接串写 `localhost` 连不上，因为 `localhost` 指的是容器自己内部，不是宿主机。
+
+### 6.2 解法：Docker 网络
+
+**同一个网络里的容器，可以用容器名互相访问。**
+
+```bash
+# 1. 创建网络
+docker network create hmall
+
+# 2. 容器加入网络
+docker run -d --name mysql --network hmall -p 3306:3306 -e MYSQL_ROOT_PASSWORD=123 mysql
+docker run -d --name hmall --network hmall -p 8080:8080 hmall:1.0
+```
+
+配置里用容器名当域名：
+
+```yaml
+url: jdbc:mysql://mysql:3306/taobao  # ✅ 容器名当域名，能连上
+```
+
+### 6.3 Docker 网络类型
+
+| 网络类型 | 作用 | 使用场景 |
+|---|---|---|
+| `bridge` | 默认网络，容器之间隔离 | 单机多容器通信（最常用） |
+| `host` | 容器直接用宿主机网络 | 需要高性能网络 |
+| `none` | 无网络 | 完全隔离的容器 |
+
+99% 的情况用 bridge（默认），手动创建的网络就是 bridge 类型。
+
+### 6.4 网络相关命令
+
+| 命令 | 作用 | 示例 |
+|---|---|---|
+| `docker network create` | 创建网络 | `docker network create mynet` |
+| `docker network ls` | 查看所有网络 | `docker network ls` |
+| `docker network rm` | 删除网络 | `docker network rm mynet` |
+| `docker network connect` | 把容器加入网络 | `docker network connect mynet myapp` |
+| `docker network disconnect` | 把容器移出网络 | `docker network disconnect mynet myapp` |
+
+---
+
+## 七、宿主机
+
+**宿主机 = 装 Docker 的那台电脑/服务器。**
+
+类比：宿主机是房子，Docker 是隔断工具，容器是隔出来的小房间。
+
+`-p 3306:3306` 左边是宿主机端口，右边是容器内部端口。外部想访问容器，必须通过宿主机的端口转进去。
+
+---
+
+## 八、部署 Java 项目
+
+### 8.1 整体流程
+
+打包 → 构建镜像 → 运行容器
+
+### 8.2 具体步骤
+
+```bash
+# 1. 打包
+mvn clean package -DskipTests
+
+# 2. 构建镜像（Dockerfile 在 jar 包同级目录）
+docker build -t docker-demo:1.0 .
+
+# 3. 创建网络
+docker network create hmall
+
+# 4. 启动 MySQL
+docker run -d --name mysql --network hmall -p 3306:3306 -e MYSQL_ROOT_PASSWORD=123 -v mysql-data:/var/lib/mysql mysql
+
+# 5. 启动 Java 项目
+docker run -d --name hmall --network hmall -p 8080:8080 docker-demo:1.0
+
+# 6. 看日志验证
+docker logs -f hmall
+```
+
+### 8.3 注意事项
+
+配置文件里的数据库连接要改成容器名：
+
+```yaml
+# 改之前（本地开发）
+url: jdbc:mysql://localhost:3306/hmall
+
+# 改之后（Docker 部署）
+url: jdbc:mysql://mysql:3306/hmall
+```
+
+---
+
+## 九、部署前端
+
+### 9.1 前端本质
+
+前端项目打包后就是静态文件（HTML/CSS/JS），用 Nginx 托管。
+
+### 9.2 Dockerfile
+
+```dockerfile
+FROM nginx:latest
+COPY dist/ /usr/share/nginx/html/
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+```
+
+### 9.3 Nginx 配置（nginx.conf）
+
+```nginx
+server {
+    listen       80;
+    server_name  localhost;
+
+    # 前端静态文件
+    location / {
+        root   /usr/share/nginx/html;
+        index  index.html;
+        try_files $uri $uri/ /index.html;  # 解决 Vue 路由刷新 404
+    }
+
+    # 反向代理后端接口
+    location /api/ {
+        proxy_pass http://hmall:8080/;
+    }
+}
+```
+
+### 9.4 前后端完整架构
+
+```
+浏览器 → Nginx(:80) → 前端页面
+                   → /api/ → Java(:8080) → MySQL(:3306)
+```
+
+---
+
+## 十、Docker Compose
+
+### 10.1 为什么需要？
+
+没有 Compose 时部署一个项目要跑 4 条 `docker run` 命令，参数一堆，容易打错。
+
+**Docker Compose = 把一堆命令写成一个 YAML 文件，一条命令全部启动。**
+
+### 10.2 docker-compose.yml 示例
+
+```yaml
+services:
+  mysql:
+    image: mysql
+    container_name: mysql
+    ports:
+      - "3306:3306"
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: 123
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - hmall
+
+  hmall:
+    build: .
+    container_name: hmall
+    ports:
+      - "8080:8080"
+    networks:
+      - hmall
+    depends_on:
+      - mysql
+
+  nginx:
+    image: nginx
+    container_name: nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./dist:/usr/share/nginx/html
+    networks:
+      - hmall
+    depends_on:
+      - hmall
+
+networks:
+  hmall:
+
+volumes:
+  mysql-data:
+```
+
+### 10.3 关键字段解读
+
+| 字段 | 作用 | 对应命令 |
+|---|---|---|
+| `image` | 用哪个镜像 | `docker run` 最后面的镜像名 |
+| `container_name` | 容器名 | `--name` |
+| `ports` | 端口映射 | `-p` |
+| `environment` | 环境变量 | `-e` |
+| `volumes` | 数据卷/目录挂载 | `-v` |
+| `networks` | 加入网络 | `--network` |
+| `depends_on` | 启动顺序 | 手动控制先启动谁 |
+| `build` | 用 Dockerfile 构建 | `docker build` |
+
+### 10.4 常用命令
+
+```bash
+# 启动所有容器（后台运行）
+docker compose up -d
+
+# 停止所有容器
+docker compose down
+
+# 查看日志
+docker compose logs -f
+
+# 查看状态
+docker compose ps
+
+# 重新构建并启动（改了 Dockerfile 后用）
+docker compose up -d --build
+```
+
+### 10.5 对比
+
+| | 没有 Compose | 有 Compose |
+|---|---|---|
+| 启动命令 | 多条 `docker run` | 1 条 `docker compose up -d` |
+| 网络 | 手动创建 | 自动创建 |
+| 数据卷 | 手动挂载 | 自动管理 |
+| 分享给别人 | 贴一堆命令 | 给一个 yml 文件 |
+
+---
+
+## 十一、常见问题
+
+### Docker 里的 MySQL 和本地 MySQL 冲突吗？
+
+**看端口。** 端口一样就冲突，换个端口就行。
+
+```bash
+# 本地 MySQL 占了 3306，Docker 就用 3307
+docker run -d --name mysql -p 3307:3306 -e MYSQL_ROOT_PASSWORD=123 mysql
+```
+
+### Navicat 能连 Docker 里的 MySQL 吗？
+
+**能。** Navicat 填宿主机 IP + 映射的端口即可。
+
+| 字段 | 填什么 |
+|---|---|
+| 主机 | `localhost` |
+| 端口 | 映射的宿主机端口（如 3307） |
+| 用户名 | `root` |
+| 密码 | 设置的密码 |
+
+### Windows 本地能跑黑马课程的 Docker 部署吗？
+
+**能。** Docker Desktop 在 Windows 上内置了 Linux 虚拟机，容器始终跑在 Linux 里，跟宿主机是 Windows 还是 CentOS 没区别。官方镜像（MySQL、Nginx、JDK）都是多架构支持的，直接用。
+
+注意：挂载本地目录时路径要改成 Windows 格式：
+```bash
+# Linux
+docker run -v /home/user/data:/var/lib/mysql ...
+# Windows
+docker run -v F:/data:/var/lib/mysql ...
+```
+
+---
+
+## 十二、全文总结
+
+| 概念 | 一句话解释 |
+|---|---|
+| 宿主机 | 装 Docker 的那台机器 |
+| 容器网络 | 同一网络里的容器用容器名互相访问 |
+| Dockerfile | 构建镜像的菜谱 |
+| Docker Compose | 把一堆 docker run 写成一个 yml，一条命令启动 |
+| 端口映射 | 宿主机端口:容器端口，外部通过宿主机访问容器 |
+| 数据卷 | 容器的外挂硬盘，容器删了数据不丢 |
+
+---
+
+## 十三、关联笔记
+
+- [[README|黑马商城项目总览]]
 
 | 概念 | 一句话解释 |
 |---|---|
