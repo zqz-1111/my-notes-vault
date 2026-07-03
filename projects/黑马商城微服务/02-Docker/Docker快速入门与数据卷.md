@@ -81,17 +81,17 @@ docker run -d \
 
 ### 3.2 容器相关（最常用）
 
-| 命令 | 作用 | 示例 |
-|---|---|---|
-| `docker run` | 创建并启动容器 | `docker run -d --name mysql -p 3306:3306 mysql` |
-| `docker ps` | 查看**运行中**的容器 | `docker ps` |
-| `docker ps -a` | 查看**所有**容器（含停止的） | `docker ps -a` |
-| `docker stop` | 停止容器 | `docker stop mysql` |
-| `docker start` | 启动已停止的容器 | `docker start mysql` |
-| `docker restart` | 重启容器 | `docker restart mysql` |
-| `docker rm` | 删除容器（要先停止） | `docker rm mysql` |
-| `docker logs` | 查看容器日志 | `docker logs -f mysql`（`-f` 持续跟踪） |
-| `docker exec` | 进入容器内部执行命令 | `docker exec -it mysql bash` |
+| 命令               | 作用               | 示例                                              |
+| ---------------- | ---------------- | ----------------------------------------------- |
+| `docker run`     | 创建并启动容器          | `docker run -d --name mysql -p 3306:3306 mysql` |
+| `docker ps`      | 查看**运行中**的容器     | `docker ps`                                     |
+| `docker ps -a`   | 查看**所有**容器（含停止的） | `docker ps -a`                                  |
+| `docker stop`    | 停止容器             | `docker stop mysql`                             |
+| `docker start`   | 启动已停止的容器         | `docker start mysql`                            |
+| `docker restart` | 重启容器             | `docker restart mysql`                          |
+| `docker rm`      | 删除容器（要先停止）       | `docker rm mysql`                               |
+| `docker logs`    | 查看容器日志           | `docker logs -f mysql`（`-f` 持续跟踪）               |
+| `docker exec`    | 进入容器内部执行命令       | `docker exec -it mysql bash`                    |
 
 **最高频的 5 个命令：**
 
