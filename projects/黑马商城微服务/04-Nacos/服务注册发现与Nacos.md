@@ -119,7 +119,91 @@ restTemplate.exchange("http://item-service/items?ids={ids}", ...)
 
 > 还需要给 RestTemplate 加 `@LoadBalanced` 注解才能用服务名，后面 OpenFeign 笔记会讲。
 
-## 五、全文总结
+## 五、服务发现实操（cart-service）
+
+### 5.1 cart-service 注册到 Nacos
+
+**pom.xml 添加依赖：**
+
+```xml
+<!--nacos 服务注册发现-->
+<dependency>
+    <groupId>com.alibaba.cloud</groupId>
+    <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+</dependency>
+<!--负载均衡-->
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-loadbalancer</artifactId>
+</dependency>
+```
+
+**application.yaml 配置：**
+
+```yaml
+spring:
+  application:
+    name: cart-service
+  cloud:
+    nacos:
+      server-addr: 192.168.188.130:8848
+```
+
+### 5.2 服务发现 + 随机负载均衡
+
+```java
+@Service
+@RequiredArgsConstructor
+public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements ICartService {
+
+    private final RestTemplate restTemplate;
+    private final DiscoveryClient discoveryClient;  // 注入 DiscoveryClient
+
+    private void handleCartItems(List<CartVO> vos) {
+        Set<Long> itemIds = vos.stream().map(CartVO::getItemId).collect(Collectors.toSet());
+
+        // 1. 从 Nacos 获取 item-service 实例列表
+        List<ServiceInstance> instances = discoveryClient.getInstances("item-service");
+        if (CollUtils.isEmpty(instances)) {
+            return;
+        }
+
+        // 2. 随机负载均衡，选一个实例
+        ServiceInstance instance = instances.get(ThreadLocalRandom.current().nextInt(instances.size()));
+
+        // 3. 用选中的实例地址发起调用
+        ResponseEntity<List<ItemDTO>> response = restTemplate.exchange(
+                instance.getUri() + "/items?ids={ids}",
+                HttpMethod.GET,
+                null,
+                new ParameterizedTypeReference<List<ItemDTO>>() {},
+                Map.of("ids", CollUtil.join(itemIds, ","))
+        );
+        // ... 解析响应
+    }
+}
+```
+
+**关键变化：**
+
+| 之前（硬编码） | 之后（服务发现） |
+|---|---|
+| `http://localhost:8081/items` | `instance.getUri() + "/items"` |
+| 地址写死，多实例没法用 | 自动发现所有实例，负载均衡 |
+
+### 5.3 踩坑记录
+
+**坑 1：Nacos 连不上**
+- 报错：`Connection refused: /192.168.188.130:9848`
+- 原因：Nacos 2.x 用 gRPC，端口是 8848+1000=9848，需要确保虚拟机 Nacos 容器正常运行
+- 解决：`docker ps | grep nacos` 检查容器状态
+
+**坑 2：端口被占用**
+- 报错：`Port 8082 was already in use`
+- 原因：QQ.exe 随机占了 8082 端口（离谱）
+- 解决：`netstat -ano | grep 8082` 找 PID，`taskkill /PID xxx /F` 杀掉
+
+## 六、全文总结
 
 1. **注册中心解决什么**：服务发现、实例管理、故障剔除、动态扩缩容
 2. **核心流程**：服务注册 → 消费者订阅 → 获取实例列表 → 负载均衡 → 发起调用
