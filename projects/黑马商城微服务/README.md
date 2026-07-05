@@ -38,7 +38,7 @@ status: 学习中
 - [ ] 03-服务拆分与治理
 - [ ] 04-Nacos
 - [ ] 05-OpenFeign
-- [ ] 06-Gateway
+- [x] 06-Gateway
 - [ ] 07-Sentinel
 - [ ] 08-Seata
 - [ ] 09-RabbitMQ
