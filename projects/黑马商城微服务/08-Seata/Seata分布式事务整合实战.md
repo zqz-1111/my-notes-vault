@@ -366,14 +366,131 @@ curl -X POST http://localhost:8080/orders \
 - 库存不变（还是 1）
 - Seata 日志显示：`rollback status: Rollbacked`
 
-## 八、全文总结
+## 八、XA 模式 vs AT 模式
+
+### 8.1 XA 模式原理
+
+XA 是 X/Open 组织定义的分布式事务标准，基于**两阶段提交**：
+
+**一阶段：**
+- 事务协调者通知每个参与者执行本地事务
+- 执行完成后报告状态，**不提交**，继续持有数据库锁
+
+**二阶段：**
+- 都成功 → 通知所有参与者提交
+- 任一失败 → 通知所有参与者回滚
+
+**Seata 的 XA 模型：**
+1. RM 一阶段：注册分支事务 → 执行 SQL 但不提交 → 报告状态
+2. TC 二阶段：检测各分支状态 → 通知提交或回滚
+3. RM 二阶段：接收指令，提交或回滚
+
+**优点：** 强一致性（ACID）、数据库原生支持、无代码侵入
+**缺点：** 锁持有时间长、性能差、依赖关系型数据库
+
+### 8.2 XA 模式实现
+
+```java
+@Configuration
+public class DataSourceConfig {
+    @Bean
+    @ConfigurationProperties(prefix = "spring.datasource")
+    public DataSource dataSource() {
+        return new DataSourceProxyXA(dataSource());  // 关键：用 XA 代理
+    }
+}
+```
+
+**核心区别：** AT 用 `DataSourceProxy`，XA 用 `DataSourceProxyXA`
+
+### 8.3 AT 模式原理（回顾）
+
+**一阶段：**
+- 拦截 SQL，记录前后镜像到 `undo_log` 表
+- **直接提交**，不锁资源
+
+**二阶段提交：** 删除 undo_log
+**二阶段回滚：** 用 undo_log 反向补偿（反向 SQL）
+
+### 8.4 AT vs XA 核心区别
+
+| 对比项 | AT 模式 | XA 模式 |
+|---|---|---|
+| 一阶段 | 直接提交 | 不提交 |
+| 锁持有 | 短（提交即释放） | 长（等二阶段） |
+| 性能 | 好 | 差 |
+| 一致性 | 最终一致 | 强一致 |
+| 脏读风险 | 有（一阶段已提交） | 无 |
+| 代码侵入 | 需要 undo_log 表 | 无 |
+| 数据库支持 | 任意 | 需支持 XA 协议 |
+
+**选择建议：**
+- 大多数场景用 **AT**（简单、性能好）
+- 金融级强一致用 **XA**
+
+---
+
+## 九、Sentinel + Seata 冲突与解决方案
+
+### 9.1 功能定位
+
+- **Sentinel**：管流量（进不进来）— 熔断、降级、限流
+- **Seata**：管事务（进来后怎么处理）— 分布式事务
+
+两者功能不冲突，但组合使用有 3 个坑：
+
+### 9.2 坑 1：超时问题
+
+**问题：** Sentinel 熔断有超时时间，Seata 事务也需要时间。如果 Sentinel 超时 < Seata 事务时间，Sentinel 先熔断 → Seata 事务被中断。
+
+**解决：** 配置 Seata 超时时间（在 shared-seata.yaml）：
+```yaml
+seata:
+  client:
+    tm:
+      default-global-transaction-timeout: 60000  # 60秒
+```
+
+### 9.3 坑 2：异常处理
+
+**问题：** Sentinel 的 fallback 会捕获异常，Seata 需要异常往上抛才能触发回滚。
+
+**实际案例（本次踩坑）：**
+```java
+// 问题代码
+try {
+    itemClient.deductStock(detailDTOS);
+} catch (Exception e) {
+    throw new RuntimeException("库存不足！");  // 异常类型变了
+}
+```
+
+`ItemClientFallback` 抛出 `BizIllegalException`，被 catch 后变成 `RuntimeException`，Seata 可能无法正确识别。
+
+**解决：** 去掉 try-catch，让异常自然抛出：
+```java
+itemClient.deductStock(detailDTOS);  // 异常直接抛出，Seata 能捕获
+```
+
+### 9.4 坑 3：资源隔离
+
+**问题：** Sentinel 线程池满时，Seata 连接拿不到 → 事务超时。
+
+**解决：** 给 Seata 相关接口配置独立线程池（流量大时再优化）。
+
+---
+
+## 十、全文总结
 
 - Seata 解决分布式事务问题，核心思想：找一个统一协调者（TC）管理多个分支事务
 - 三个角色：TC（独立部署）、TM（发起事务）、RM（参与事务）
-- AT 模式最简单：加 `@GlobalTransactional` + 建 `undo_log` 表
+- **四种模式**：AT（默认）、TCC、Saga、XA
+- **AT 模式**：一阶段直接提交 + undo_log 记录镜像，性能好但有脏读风险
+- **XA 模式**：一阶段不提交，强一致但性能差
 - Docker 部署 Seata Server 注意：用配置文件挂载（不用环境变量）、加入 hm-net 网络
 - 微服务整合三步：加依赖 → 创建 bootstrap.yaml 引入 shared-seata.yaml → 改注解
-- 测试验证：正常下单提交成功，库存不足回滚成功
+- **Sentinel + Seata 组合注意**：超时配置、异常不要被 fallback 吞掉、资源隔离
+- 代码审查发现 try-catch 会影响 Seata 回滚，去掉后异常自然抛出
 
 ## 九、关联笔记
 
