@@ -39,8 +39,8 @@ status: 学习中
 - [ ] 04-Nacos
 - [ ] 05-OpenFeign
 - [x] 06-Gateway
-- [ ] 07-Sentinel
-- [ ] 08-Seata
+- [x] 07-Sentinel
+- [x] 08-Seata
 - [ ] 09-RabbitMQ
 - [ ] 10-Elasticsearch
 - [ ] 11-Redis进阶
