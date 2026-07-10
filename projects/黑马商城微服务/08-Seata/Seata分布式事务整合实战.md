@@ -492,7 +492,152 @@ itemClient.deductStock(detailDTOS);  // 异常直接抛出，Seata 能捕获
 - **Sentinel + Seata 组合注意**：超时配置、异常不要被 fallback 吞掉、资源隔离
 - 代码审查发现 try-catch 会影响 Seata 回滚，去掉后异常自然抛出
 
-## 九、关联笔记
+## 九、pay-service 整合 Seata（余额支付场景）
+
+### 9.1 业务场景分析
+
+用户选择余额支付时，pay-service 需要做三件事：
+
+```
+pay-service (TM)
+    │
+    │ ① 开启全局事务
+    ▼
+    ├──→ user-service (RM)：扣减余额（远程调用）
+    ├──→ pay-service (RM)：更新支付单状态（本地）
+    └──→ trade-service (RM)：更新订单状态（远程调用）
+    
+    任意一步失败 → Seata 自动回滚所有操作
+```
+
+**风险场景：**
+- 余额扣了，但支付单没更新 → 钱扣了，订单显示未支付
+- 支付单更新了，但订单没更新 → 支付成功，订单状态没变
+
+### 9.2 改造步骤
+
+#### 第一步：pom.xml 添加依赖
+
+```xml
+<!--统一配置管理-->
+<dependency>
+    <groupId>com.alibaba.cloud</groupId>
+    <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
+</dependency>
+<!--读取bootstrap文件-->
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-bootstrap</artifactId>
+</dependency>
+<!--seata-->
+<dependency>
+    <groupId>com.alibaba.cloud</groupId>
+    <artifactId>spring-cloud-starter-alibaba-seata</artifactId>
+</dependency>
+```
+
+#### 第二步：创建 bootstrap.yaml
+
+```yaml
+spring:
+  application:
+    name: pay-service
+  profiles:
+    active: dev
+  cloud:
+    nacos:
+      server-addr: 192.168.188.130:8848
+      config:
+        file-extension: yaml
+        shared-configs:
+          - dataId: shared-jdbc.yaml
+          - dataId: shared-log.yaml
+          - dataId: shared-swagger.yaml
+          - dataId: shared-seata.yaml  # 关键：引入 Seata 共享配置
+```
+
+#### 第三步：精简 application.yaml
+
+```yaml
+server:
+  port: 8086
+feign:
+  sentinel:
+    enabled: true
+hm:
+  db:
+    database: hm-pay  # 只保留服务特有配置
+```
+
+> **踩坑：** `hm.db.database` 必须配置，否则 Nacos 的 shared-jdbc.yaml 里的 `${hm.db.database}` 会解析失败。
+
+#### 第四步：修改 PayOrderServiceImpl
+
+```java
+import io.seata.spring.annotation.GlobalTransactional;
+
+@Override
+@GlobalTransactional  // 替换原来的 @Transactional
+public void tryPayOrderByBalance(PayOrderFormDTO payOrderDTO) {
+    // 1.查询支付单
+    // 2.判断状态
+    // 3.扣减余额 ← user-service（远程调用）
+    // 4.修改支付单状态 ← pay-service（本地）
+    // 5.修改订单状态 ← trade-service（远程调用）
+}
+```
+
+#### 第五步：创建 undo_log 表
+
+Seata AT 模式需要在每个业务数据库创建 `undo_log` 表：
+
+```sql
+CREATE TABLE IF NOT EXISTS `undo_log` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `branch_id` bigint(20) NOT NULL,
+  `xid` varchar(100) NOT NULL,
+  `context` varchar(128) NOT NULL,
+  `rollback_info` longblob NOT NULL,
+  `log_status` int(11) NOT NULL,
+  `log_created` datetime NOT NULL,
+  `log_modified` datetime NOT NULL,
+  `ext` varchar(100) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `ux_undo_log` (`xid`,`branch_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+```
+
+> **注意：** hm-pay、hm-trade、hm-item、hm-cart 每个库都要有这张表。
+
+### 9.3 测试验证
+
+#### 正常支付（提交）
+
+1. 前端登录 jack/123
+2. 添加商品到购物车
+3. 提交订单
+4. 选择余额支付，输入正确密码 123
+5. 支付成功
+
+**结果：**
+- 余额减少 ✅
+- 支付单状态更新为「交易成功」 ✅
+- 订单状态更新为「已支付」 ✅
+
+#### 错误密码支付（回滚）
+
+1. 故意输入错误密码（如 456）
+2. 支付失败
+
+**结果：**
+- 余额不变 ✅
+- 支付单状态还是「待支付」 ✅
+- 订单状态还是「待支付」 ✅
+- Seata 日志：`rollback status: Rollbacked` ✅
+
+---
+
+## 十、关联笔记
 
 - [[Sentinel入门与微服务整合]]
 - [[Nacos配置管理]]
